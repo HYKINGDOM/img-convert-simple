@@ -1,0 +1,12 @@
+# Image processing and conversion
+Pillow>=10.0.0
+
+# Database connectivity
+psycopg2-binary>=2.9.7
+SQLAlchemy>=2.0.0
+
+# Configuration management
+python-dotenv>=1.0.0
+
+# Logging and utilities
+coloredlogs>=15.0.1
