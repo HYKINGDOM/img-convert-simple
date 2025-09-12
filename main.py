@@ -63,16 +63,17 @@ class ImageDuplicateDetector:
             True if initialization successful, False otherwise
         """
         try:
-            # Initialize database
+            # Initialize database connection and tables
             if not initialize_database():
                 logger.error("Failed to initialize database")
                 return False
             
-            # Create output directory
+            # Ensure output directory exists
             output_dir = Path(self.config['output_dir'])
             output_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Output directory: {output_dir.resolve()}")
             
-            # Initialize file scanner
+            # Initialize file scanner with supported extensions and callback
             scan_interval = self.config.get('scan_interval', 5)
             self.file_scanner = FileScanner(
                 supported_extensions=SUPPORTED_EXTENSIONS,
@@ -80,11 +81,14 @@ class ImageDuplicateDetector:
                 scan_interval=scan_interval
             )
             
-            # Add scan paths
+            # Validate and add scan paths
             for scan_path in self.config['scan_paths']:
                 if not self.file_scanner.add_scan_path(scan_path, recursive=True):
                     logger.error(f"Failed to add scan path: {scan_path}")
                     return False
+            if not self.file_scanner.scan_paths:
+                logger.error("No valid scan paths configured after initialization")
+                return False
             
             logger.info("Application initialized successfully")
             return True
@@ -96,6 +100,7 @@ class ImageDuplicateDetector:
     def _process_file(self, file_path: Path):
         """Process a single file (called by file scanner).
         
+        This method runs in the FileScanner's worker thread. Keep it fast and thread-safe.
         Args:
             file_path: Path to the image file
         """
@@ -112,14 +117,16 @@ class ImageDuplicateDetector:
             # Process the image file
             success = self._process_image_file(file_path)
             
+            # Update stats under lock to avoid race conditions
             with self.processing_lock:
                 if success:
                     self.stats['processed'] += 1
                 else:
                     self.stats['errors'] += 1
+                processed = self.stats['processed']
             
-            # Print progress every 10 files
-            if self.stats['processed'] % 10 == 0:
+            # Print progress every 10 files (read processed value outside lock)
+            if processed > 0 and processed % 10 == 0:
                 self._print_stats()
                 
         except Exception as e:
@@ -130,6 +137,8 @@ class ImageDuplicateDetector:
     def _process_image_file(self, file_path: Path) -> bool:
         """Process a single image file with duplicate detection.
         
+        Flow:
+        1) 快速验证文件与图片格式；2) 计算哈希并查重；3) 记录元数据；4) 移动到输出目录。
         Args:
             file_path: Path to the image file
         
@@ -139,10 +148,18 @@ class ImageDuplicateDetector:
         try:
             print(f"[处理] 正在处理文件: {file_path.name}")
             
-            # Get file information
+            # 先进行图片快速校验，避免对无效文件做昂贵的哈希/数据库操作
+            if not self.image_processor.is_supported_format(file_path):
+                print(f"[跳过] 不支持的图片格式: {file_path.suffix}")
+                return True  # 非错误，仅跳过
+            if not self.image_processor.validate_image(file_path):
+                print(f"[跳过] 非法或损坏的图片文件: {file_path.name}")
+                return True  # 非错误，仅跳过
+            
+            # 获取文件大小（用于元数据）
             file_size = file_path.stat().st_size
             
-            # Calculate file hash
+            # Calculate file hash（用于去重）
             print(f"[计算] 计算文件hash: {file_path.name}")
             file_hash = db_manager.calculate_file_hash(file_path)
             
@@ -176,7 +193,7 @@ class ImageDuplicateDetector:
             
             # Add to database
             try:
-                metadata_id = db_manager.add_image_metadata(
+                _ = db_manager.add_image_metadata(
                     filename=file_path.name,
                     original_path=str(file_path),
                     file_size=file_size,
@@ -269,8 +286,15 @@ class ImageDuplicateDetector:
             
             # Keep running until stopped
             try:
+                # 动态打印间隔（当队列空闲时减少打印频率）
+                idle_print_interval = 20
+                busy_print_interval = 10
                 while self.is_running:
-                    time.sleep(10)  # Print stats every 10 seconds
+                    # 根据队列状态调整打印频率
+                    interval = busy_print_interval
+                    if self.file_scanner and self.file_scanner.is_queue_empty():
+                        interval = idle_print_interval
+                    time.sleep(interval)
                     if self.is_running:
                         self._print_stats()
                         
@@ -283,22 +307,34 @@ class ImageDuplicateDetector:
             self.stop()
     
     def stop(self):
-        """Stop the application."""
+        """Stop the application gracefully: stop worker threads, print final stats, and close database connections."""
         if not self.is_running:
+            # 即使当前状态为未运行，也尝试关闭数据库连接以确保资源释放
+            try:
+                db_manager.close()
+            except Exception:
+                pass
             return
         
         print("\n正在停止应用程序...")
         
         try:
+            # 标记停止运行，通知后台循环退出
             self.is_running = False
             
-            # Stop file scanner
+            # 停止文件扫描与处理线程
             if self.file_scanner:
                 self.file_scanner.stop()
             
-            # Print final statistics
+            # 打印最终统计快照
             print("\n=== 最终统计 ===")
             self._print_stats()
+            
+            # 确保数据库连接被正确释放，避免连接泄漏
+            try:
+                db_manager.close()
+            except Exception as e:
+                logger.warning(f"Failed to close database cleanly: {e}")
             
             logger.info("Application stopped successfully")
             
@@ -306,17 +342,17 @@ class ImageDuplicateDetector:
             logger.error(f"Error stopping application: {e}")
 
 def load_config() -> Dict[str, Any]:
-    """Load configuration from environment variables.
+    """从环境变量加载配置（可被命令行参数覆盖）。
     
-    Returns:
-        Configuration dictionary
+    返回：
+        配置字典
     """
-    # Parse scan paths
+    # 解析扫描路径，兼容 SCAN_PATHS 与历史 WATCH_PATHS，逗号分隔
     scan_paths_str = os.getenv('SCAN_PATHS', os.getenv('WATCH_PATHS', ''))
     scan_paths = [path.strip() for path in scan_paths_str.split(',') if path.strip()]
     
     if not scan_paths:
-        scan_paths = ['./test_input']  # Default path
+        scan_paths = ['./test_input']  # 默认路径，便于开箱即用
     
     config = {
         'scan_paths': scan_paths,
@@ -345,9 +381,12 @@ def setup_logging(log_level: str = 'INFO'):
     logging.getLogger('urllib3').setLevel(logging.WARNING)
 
 def signal_handler(signum, frame):
-    """Handle system signals for graceful shutdown."""
+    """Handle system signals for graceful shutdown.
+    Note: main() registers this handler and will call app.stop() in finally block.
+    Here we simply raise KeyboardInterrupt to trigger graceful shutdown path.
+    """
     print(f"\n收到信号 {signum}，正在关闭应用程序...")
-    sys.exit(0)
+    raise KeyboardInterrupt
 
 def main():
     """Main entry point."""
