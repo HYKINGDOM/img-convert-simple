@@ -81,17 +81,20 @@ cp .env.example .env
 venv\Scripts\activate  # Windows
 # source venv/bin/activate  # Linux/macOS
 
-# 使用默认设置运行（监控当前目录）
+# 使用默认设置运行（使用 .env 文件中的配置）
 python main.py
 
-# 监控特定目录
-python main.py --watch-path "C:\Images\Input"
+# 指定扫描路径
+python main.py --scan-paths "C:\Images\Input"
 
-# 转换为 PNG 格式
-python main.py --format png --watch-path "./input_images"
+# 指定输出目录
+python main.py --scan-paths "./input_images" --output-dir "./output"
 
-# 多个监控路径
-python main.py -w "./folder1" -w "./folder2" -o "./output"
+# 多个扫描路径
+python main.py --scan-paths "./folder1" "./folder2" --output-dir "./output"
+
+# 批量处理模式
+python main.py --batch-process "./existing_photos"
 ```
 
 ### 命令行选项
@@ -100,13 +103,10 @@ python main.py -w "./folder1" -w "./folder2" -o "./output"
 python main.py [选项]
 
 选项：
-  -w, --watch-path PATH     要监控的目录（可多次使用）
-  -o, --output-dir PATH     转换后图片的输出目录
-  -f, --format FORMAT       目标格式：jpg、png、webp、bmp、tiff
-  -q, --quality INT         JPEG 质量（1-100，默认：85）
-  --no-delete              转换后保留原文件
-  --no-scan                启动时跳过扫描现有文件
-  --workers INT            工作线程数（默认：4）
+  --config CONFIG          配置文件路径
+  --scan-paths PATHS       要扫描的目录路径（可指定多个）
+  --output-dir PATH        转换后图片的输出目录
+  --scan-interval INT      扫描间隔（秒）
   --log-level LEVEL        日志级别：DEBUG、INFO、WARNING、ERROR
   
   # 批量处理选项
@@ -142,20 +142,20 @@ python main.py --batch-process "./photos" --log-level DEBUG
 ### 使用示例
 
 ```bash
-# 高质量 JPEG 转换并保留原文件
-python main.py -w "./photos" -f jpg -q 95 --no-delete
+# 使用调试模式查看详细日志
+python main.py --log-level DEBUG --scan-paths "./test_images"
 
-# WebP 转换并指定输出目录
-python main.py -w "./input" -o "./webp_output" -f webp
+# 指定扫描间隔（每30秒扫描一次）
+python main.py --scan-paths "./input" --scan-interval 30
 
-# 调试模式，详细日志
-python main.py --log-level DEBUG -w "./test_images"
-
-# 生产环境设置，多工作线程
-python main.py -w "./production_input" --workers 8 -f png
-
-# 批量处理现有图片库
+# 批量处理现有图片库（递归处理子文件夹）
 python main.py --batch-process "./existing_photos" --log-level INFO
+
+# 批量处理但不递归处理子文件夹
+python main.py --batch-process "./photos" --no-recursive
+
+# 使用配置文件
+python main.py --config "./custom_config.env"
 ```
 
 ## 数据库结构
@@ -196,37 +196,29 @@ CREATE INDEX idx_created_at ON image_metadata(created_at);
    - 更新数据库处理信息
 5. **重复处理**：如果检测到重复，自动删除文件
 
-## 配置选项
+### 配置选项
 
 ### 环境变量（.env 文件）
 
 ```env
-# 数据库
+# 数据库配置
 DATABASE_URL=postgresql://user:pass@host:port/dbname
 
-# 应用程序
-WATCH_PATHS=./input1,./input2
+# 应用程序配置
+SCAN_PATHS=./input1,./input2
 OUTPUT_DIR=./converted_images
-TARGET_FORMAT=jpg
-IMAGE_QUALITY=85
-DELETE_ORIGINALS=true
-SCAN_EXISTING=true
-MAX_WORKERS=4
+SCAN_INTERVAL=5
 
-# 日志
+# 日志配置
 LOG_LEVEL=INFO
-STATS_INTERVAL=60
 ```
 
 ### 应用程序设置
 
-- **watch_paths**：要监控的目录列表
+- **scan_paths**：要扫描的目录列表（从 .env 文件或命令行参数）
 - **output_dir**：转换后图片的目录
-- **target_format**：默认转换格式
-- **quality**：JPEG 质量（1-100）
-- **delete_originals**：是否删除源文件
-- **scan_existing**：启动时扫描现有文件
-- **max_workers**：处理线程数
+- **scan_interval**：扫描间隔（秒）
+- **log_level**：日志级别（DEBUG、INFO、WARNING、ERROR）
 
 ## 日志记录
 
@@ -427,10 +419,14 @@ python file_monitor.py
 1. **确保数据库连接可用** - 检查 PostgreSQL 服务器连接
 2. **使用正确的命令行参数**：
    ```bash
-   python main.py --watch-path ./input_folder --output-dir D:\converted_images
+   python main.py --scan-paths ./input_folder --output-dir D:\converted_images
    ```
 3. **检查配置文件** - 确保 `.env` 文件中的设置正确
 4. **监控日志输出** - 应用程序提供详细的处理日志
+5. **批量处理模式** - 对于现有图片库，使用批量处理功能：
+   ```bash
+   python main.py --batch-process ./existing_photos
+   ```
 
 ## 许可证
 

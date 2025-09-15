@@ -6,11 +6,13 @@ Handles PostgreSQL connection, schema creation, and image metadata operations.
 
 import hashlib
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from contextlib import contextmanager
 
+from dotenv import load_dotenv
 from sqlalchemy import (
     create_engine, Column, Integer, String, DateTime, BigInteger,
     Boolean, Text, Index, UniqueConstraint
@@ -20,11 +22,14 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
+# Load environment variables
+load_dotenv()
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
 # Database configuration
-DATABASE_URL = "postgresql://user_tZGjBb:password_fajJed@10.0.203.172:5432/user_tZGjBb"
+DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://localhost:5432/defaultdb')
 
 # SQLAlchemy setup
 Base = declarative_base()
