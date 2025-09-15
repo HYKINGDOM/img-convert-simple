@@ -236,6 +236,128 @@ class ImageDuplicateDetector:
             logger.error(f"Failed to process image file {file_path.name}: {e}")
             return False
     
+    def batch_process_folder(self, folder_path: str, recursive: bool = True) -> Dict[str, int]:
+        """批量处理文件夹中的所有图片文件，计算hash去重后插入数据库。
+        
+        Args:
+            folder_path: 要处理的文件夹路径
+            recursive: 是否递归处理子文件夹
+            
+        Returns:
+            处理结果统计字典，包含processed、duplicates、errors、skipped等计数
+        """
+        folder = Path(folder_path)
+        if not folder.exists() or not folder.is_dir():
+            logger.error(f"文件夹不存在或不是有效目录: {folder_path}")
+            return {'processed': 0, 'duplicates': 0, 'errors': 0, 'skipped': 0}
+        
+        # 初始化统计
+        batch_stats = {
+            'processed': 0,
+            'duplicates': 0, 
+            'errors': 0,
+            'skipped': 0
+        }
+        
+        print(f"\n=== 开始批量处理文件夹 ===")
+        print(f"目标文件夹: {folder.resolve()}")
+        print(f"递归处理: {'是' if recursive else '否'}")
+        print(f"支持格式: {', '.join(SUPPORTED_EXTENSIONS)}")
+        print("========================\n")
+        
+        try:
+            # 获取所有图片文件
+            pattern = '**/*' if recursive else '*'
+            all_files = []
+            
+            for ext in SUPPORTED_EXTENSIONS:
+                # 支持大小写不敏感的扩展名匹配
+                all_files.extend(folder.glob(f"{pattern}.{ext}"))
+                all_files.extend(folder.glob(f"{pattern}.{ext.upper()}"))
+            
+            total_files = len(all_files)
+            print(f"[扫描] 找到 {total_files} 个图片文件")
+            
+            if total_files == 0:
+                print("[完成] 未找到任何图片文件")
+                return batch_stats
+            
+            # 处理每个文件
+            for i, file_path in enumerate(all_files, 1):
+                try:
+                    print(f"\n[{i}/{total_files}] 处理文件: {file_path.name}")
+                    
+                    # 验证文件格式和有效性
+                    if not self.image_processor.is_supported_format(file_path):
+                        print(f"[跳过] 不支持的图片格式: {file_path.suffix}")
+                        batch_stats['skipped'] += 1
+                        continue
+                        
+                    if not self.image_processor.validate_image(file_path):
+                        print(f"[跳过] 非法或损坏的图片文件: {file_path.name}")
+                        batch_stats['skipped'] += 1
+                        continue
+                    
+                    # 获取文件信息
+                    file_size = file_path.stat().st_size
+                    
+                    # 计算文件hash
+                    print(f"[计算] 计算文件hash...")
+                    file_hash = db_manager.calculate_file_hash(file_path)
+                    
+                    # 检查重复
+                    existing_filename = db_manager.check_duplicate(file_hash)
+                    if existing_filename:
+                        print(f"[重复] 发现重复文件 (与 {existing_filename} 重复)")
+                        batch_stats['duplicates'] += 1
+                        continue
+                    
+                    # 插入数据库
+                    try:
+                        _ = db_manager.add_image_metadata(
+                            filename=file_path.name,
+                            original_path=str(file_path),
+                            file_size=file_size,
+                            file_hash=file_hash
+                        )
+                        print(f"[数据库] 已保存文件信息到数据库")
+                        batch_stats['processed'] += 1
+                        
+                    except Exception as e:
+                        print(f"[错误] 保存到数据库失败: {e}")
+                        logger.error(f"Failed to add image metadata for {file_path.name}: {e}")
+                        batch_stats['errors'] += 1
+                        
+                except Exception as e:
+                    print(f"[错误] 处理文件失败: {e}")
+                    logger.error(f"Failed to process file {file_path.name}: {e}")
+                    batch_stats['errors'] += 1
+                
+                # 每处理10个文件打印一次进度
+                if i % 10 == 0:
+                    print(f"\n--- 进度报告 ({i}/{total_files}) ---")
+                    print(f"已处理: {batch_stats['processed']}")
+                    print(f"重复: {batch_stats['duplicates']}")
+                    print(f"跳过: {batch_stats['skipped']}")
+                    print(f"错误: {batch_stats['errors']}")
+                    print("---------------------------\n")
+            
+            # 打印最终统计
+            print(f"\n=== 批量处理完成 ===")
+            print(f"总文件数: {total_files}")
+            print(f"成功处理: {batch_stats['processed']}")
+            print(f"重复文件: {batch_stats['duplicates']}")
+            print(f"跳过文件: {batch_stats['skipped']}")
+            print(f"错误文件: {batch_stats['errors']}")
+            print("==================\n")
+            
+            return batch_stats
+            
+        except Exception as e:
+            logger.error(f"批量处理文件夹失败: {e}")
+            print(f"[错误] 批量处理失败: {e}")
+            return batch_stats
+    
     def _print_stats(self):
         """Print current processing statistics."""
         with self.processing_lock:
@@ -398,6 +520,10 @@ def main():
     parser.add_argument('--scan-interval', type=int, help='Scan interval in seconds')
     parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], help='Log level')
     
+    # 添加批量处理功能的参数
+    parser.add_argument('--batch-process', metavar='FOLDER_PATH', help='批量处理指定文件夹中的所有图片文件，计算hash去重后插入数据库')
+    parser.add_argument('--no-recursive', action='store_true', help='批量处理时不递归处理子文件夹（默认递归处理）')
+    
     args = parser.parse_args()
     
     # Load configuration
@@ -428,7 +554,34 @@ def main():
         sys.exit(1)
     
     try:
-        app.start()
+        # 检查是否是批量处理模式
+        if args.batch_process:
+            # 批量处理模式
+            recursive = not args.no_recursive
+            print(f"\n=== 批量处理模式 ===")
+            print(f"目标文件夹: {args.batch_process}")
+            print(f"递归处理: {'是' if recursive else '否'}")
+            print("==================\n")
+            
+            # 执行批量处理
+            result = app.batch_process_folder(args.batch_process, recursive=recursive)
+            
+            # 打印最终结果
+            print(f"\n=== 批量处理结果 ===")
+            print(f"成功处理: {result['processed']} 个文件")
+            print(f"重复文件: {result['duplicates']} 个文件")
+            print(f"跳过文件: {result['skipped']} 个文件")
+            print(f"错误文件: {result['errors']} 个文件")
+            print("==================\n")
+            
+            if result['errors'] > 0:
+                print(f"警告: 有 {result['errors']} 个文件处理失败，请检查日志")
+                sys.exit(1)
+            else:
+                print("批量处理成功完成！")
+        else:
+            # 常规监控模式
+            app.start()
     except KeyboardInterrupt:
         print("\n用户中断，正在退出...")
     except Exception as e:

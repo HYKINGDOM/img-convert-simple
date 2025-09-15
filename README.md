@@ -108,8 +108,36 @@ python main.py [选项]
   --no-scan                启动时跳过扫描现有文件
   --workers INT            工作线程数（默认：4）
   --log-level LEVEL        日志级别：DEBUG、INFO、WARNING、ERROR
+  
+  # 批量处理选项
+  --batch-process PATH     批量处理指定文件夹中的所有图片文件
+  --no-recursive           批量处理时不递归处理子文件夹
+  
   -h, --help               显示帮助信息
 ```
+
+### 批量处理功能
+
+除了实时监控模式，应用程序还提供批量处理功能，可以一次性处理文件夹中的所有图片文件：
+
+```bash
+# 批量处理指定文件夹（递归处理子文件夹）
+python main.py --batch-process "./images_folder"
+
+# 批量处理但不递归处理子文件夹
+python main.py --batch-process "./images_folder" --no-recursive
+
+# 结合其他选项使用
+python main.py --batch-process "./photos" --log-level DEBUG
+```
+
+**批量处理功能特点：**
+- 遍历指定文件夹中的所有支持格式的图片文件
+- 计算每个文件的 SHA-256 哈希值进行去重
+- 将非重复文件的元数据插入数据库
+- 支持递归处理子文件夹（默认开启）
+- 提供详细的处理进度和统计信息
+- 不会移动或删除原文件，仅进行数据库记录
 
 ### 使用示例
 
@@ -125,6 +153,9 @@ python main.py --log-level DEBUG -w "./test_images"
 
 # 生产环境设置，多工作线程
 python main.py -w "./production_input" --workers 8 -f png
+
+# 批量处理现有图片库
+python main.py --batch-process "./existing_photos" --log-level INFO
 ```
 
 ## 数据库结构
