@@ -37,67 +37,79 @@ class ImageProcessor:
         return file_path.suffix.lower() in SUPPORTED_EXTENSIONS
     
     def get_image_info(self, file_path: Path) -> Dict[str, Any]:
-        """Extract basic image information.
+        """
+        提取基本图像信息（优化版本）。
+        
+        使用更高效的方式获取图像信息，避免不必要的数据加载。
         
         Args:
-            file_path: Path to the image file
+            file_path: 图像文件路径
         
         Returns:
-            Dictionary containing image information
+            包含图像信息的字典
         
         Raises:
-            Exception: If image cannot be processed
+            Exception: 如果无法处理图像
         """
         try:
             if not file_path.exists():
-                raise FileNotFoundError(f"Image file not found: {file_path}")
+                raise FileNotFoundError(f"图像文件不存在: {file_path}")
             
             if not self.is_supported_format(file_path):
-                raise ValueError(f"Unsupported image format: {file_path.suffix}")
+                raise ValueError(f"不支持的图像格式: {file_path.suffix}")
             
-            # Open and analyze image
+            # 使用优化的方式打开图像，避免加载完整图像数据
             with Image.open(file_path) as img:
-                # Get basic image information
+                # 获取基本图像信息，不加载像素数据
                 info = {
                     'width': img.width,
                     'height': img.height,
                     'format': img.format,
                     'mode': img.mode,
                     'size_bytes': file_path.stat().st_size,
-                    'filename': file_path.name
+                    'filename': file_path.name,
+                    'pixel_count': img.width * img.height  # 添加像素总数用于性能分析
                 }
                 
-                # Add additional metadata if available
+                # 只在需要时获取额外的元数据
                 if hasattr(img, 'info') and img.info:
-                    # Only include safe metadata
+                    # 只包含安全的元数据，避免内存泄漏
                     safe_keys = {'dpi', 'quality', 'transparency'}
                     for key in safe_keys:
                         if key in img.info:
                             info[key] = img.info[key]
                 
-                logger.debug(f"Extracted info for {file_path.name}: {info}")
+                logger.debug(f"提取图像信息完成 {file_path.name}: {info['width']}x{info['height']}")
                 return info
                 
         except Exception as e:
-            logger.error(f"Failed to get image info for {file_path.name}: {e}")
+            logger.error(f"获取图像信息失败 {file_path.name}: {e}")
             raise
     
     def validate_image(self, file_path: Path) -> bool:
-        """Validate if the file is a valid image.
+        """
+        验证文件是否为有效图像（优化版本）。
+        
+        使用快速验证方式，避免完整加载图像数据。
         
         Args:
-            file_path: Path to the image file
+            file_path: 图像文件路径
         
         Returns:
-            True if image is valid, False otherwise
+            如果图像有效返回 True，否则返回 False
         """
         try:
+            # 首先检查文件扩展名
+            if not self.is_supported_format(file_path):
+                return False
+                
+            # 使用 PIL 的快速验证，不加载完整图像数据
             with Image.open(file_path) as img:
-                # Try to load the image data to verify it's valid
+                # 只验证图像头部信息，不加载像素数据
                 img.verify()
                 return True
         except Exception as e:
-            logger.warning(f"Image validation failed for {file_path.name}: {e}")
+            logger.debug(f"图像验证失败 {file_path.name}: {e}")
             return False
     
     def get_supported_extensions(self) -> Set[str]:

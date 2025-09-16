@@ -34,33 +34,32 @@ DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://localhost:5432/defaultdb'
 # SQLAlchemy setup
 Base = declarative_base()
 
-class ImageMetadata(Base):
-    """SQLAlchemy model for image metadata storage."""
-    __tablename__ = 'image_metadata'
+class FileRecord(Base):
+    """SQLAlchemy model for file records storage."""
+    __tablename__ = 'file_records'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    filename = Column(String(255), nullable=False)
-    original_path = Column(Text, nullable=False)
-    width = Column(Integer, nullable=True)
-    height = Column(Integer, nullable=True)
-    format = Column(String(10), nullable=True)
+    hash = Column(String(128), nullable=False, unique=True)
+    original_name = Column(String(500), nullable=False)
     file_size = Column(BigInteger, nullable=False)
-    file_hash = Column(String(64), nullable=False, unique=True)  # SHA-256 hash
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    processed_at = Column(DateTime, nullable=True)
-    moved_to_path = Column(String(500), nullable=True)
-    is_duplicate = Column(Boolean, nullable=False, default=False)
+    extension = Column(String(50), nullable=False)
+    created_at = Column(DateTime, nullable=False)
+    processed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    source_path = Column(Text, nullable=False)
+    target_path = Column(Text, nullable=True)
+    hash_type = Column(String(20), nullable=False, default='sha256')
     
     # Indexes for performance
     __table_args__ = (
-        Index('idx_file_hash', 'file_hash'),
-        Index('idx_filename', 'filename'),
-        Index('idx_created_at', 'created_at'),
-        UniqueConstraint('file_hash', name='uq_image_hash'),
+        Index('idx_file_records_hash', 'hash'),
+        Index('idx_file_records_extension', 'extension'),
+        Index('idx_file_records_processed_at', 'processed_at'),
+        Index('idx_file_records_file_size', 'file_size'),
+        UniqueConstraint('hash', name='uq_file_hash'),
     )
     
     def __repr__(self):
-        return f"<ImageMetadata(filename='{self.filename}', hash='{self.file_hash[:8]}...')>"
+        return f"<FileRecord(original_name='{self.original_name}', hash='{self.hash[:8]}...')>"
 
 class DatabaseManager:
     """Manages database connections and operations with connection pooling."""
@@ -117,54 +116,100 @@ class DatabaseManager:
         finally:
             session.close()
     
-    def calculate_file_hash(self, file_path: Path) -> str:
-        """Calculate SHA-256 hash of a file."""
+    def calculate_file_hash(self, file_path: Path, chunk_size: int = 65536) -> str:
+        """
+        计算文件的 SHA-256 哈希值（优化版本）。
+        
+        使用更大的缓冲区提高 I/O 性能，并添加文件大小检查优化。
+        
+        Args:
+            file_path (Path): 文件路径
+            chunk_size (int): 读取缓冲区大小，默认 64KB
+            
+        Returns:
+            str: 文件的 SHA-256 哈希值
+            
+        Raises:
+            Exception: 文件读取失败时抛出异常
+        """
         hash_sha256 = hashlib.sha256()
         try:
-            with open(file_path, 'rb') as f:
-                for chunk in iter(lambda: f.read(4096), b""):
-                    hash_sha256.update(chunk)
+            # 获取文件大小用于优化小文件处理
+            file_size = file_path.stat().st_size
+            
+            # 对于小文件（<1MB），一次性读取
+            if file_size < 1024 * 1024:
+                with open(file_path, 'rb') as f:
+                    hash_sha256.update(f.read())
+            else:
+                # 对于大文件，使用优化的块大小分块读取
+                with open(file_path, 'rb') as f:
+                    while chunk := f.read(chunk_size):
+                        hash_sha256.update(chunk)
+                        
             return hash_sha256.hexdigest()
         except Exception as e:
-            logger.error(f"Failed to calculate hash for {file_path}: {e}")
+            logger.error(f"计算文件哈希失败 {file_path}: {e}")
             raise
     
     def check_duplicate(self, file_hash: str) -> Optional[str]:
-        """Check if an image with the same hash already exists."""
+        """
+        检查是否存在相同哈希值的文件（优化版本）。
+        
+        使用索引优化查询性能，只返回必要的字段。
+        
+        Args:
+            file_hash (str): 文件哈希值
+            
+        Returns:
+            Optional[str]: 如果存在重复文件，返回原始文件名；否则返回 None
+            
+        Raises:
+            Exception: 数据库查询失败时抛出异常
+        """
         try:
             with self.get_session() as session:
-                existing = session.query(ImageMetadata).filter(
-                    ImageMetadata.file_hash == file_hash
+                # 只查询需要的字段，提高查询性能
+                result = session.query(FileRecord.original_name).filter(
+                    FileRecord.hash == file_hash
                 ).first()
-                return existing.filename if existing else None
+                return result[0] if result else None
         except Exception as e:
-            logger.error(f"Failed to check duplicate for hash {file_hash}: {e}")
+            logger.error(f"检查重复文件失败，哈希: {file_hash[:8]}..., 错误: {e}")
             raise
     
-    def add_image_metadata(self, 
-                          filename: str,
-                          original_path: str,
-                          file_size: int,
-                          file_hash: str) -> int:
-        """Add new image metadata to database."""
+    def add_file_record(self, 
+                       original_name: str,
+                       source_path: str,
+                       file_size: int,
+                       file_hash: str,
+                       extension: str,
+                       created_at: datetime,
+                       target_path: str = None,
+                       hash_type: str = 'sha256') -> int:
+        """Add new file record to database."""
         try:
             with self.get_session() as session:
-                metadata = ImageMetadata(
-                    filename=filename,
-                    original_path=original_path,
+                record = FileRecord(
+                    hash=file_hash,
+                    original_name=original_name,
+                    source_path=source_path,
                     file_size=file_size,
-                    file_hash=file_hash
+                    extension=extension,
+                    created_at=created_at,
+                    target_path=target_path,
+                    hash_type=hash_type
                 )
-                session.add(metadata)
+                session.add(record)
                 session.flush()  # Get the ID without committing
-                metadata_id = metadata.id
-                logger.info(f"Added image metadata for {filename}")
-                return metadata_id
+                record_id = record.id
+                logger.info(f"Added file record for {original_name}")
+                return record_id
         except IntegrityError as e:
-            logger.warning(f"Duplicate hash detected for {filename}: {e}")
+            logger.warning(f"Duplicate hash detected for {original_name}: {e}")
             raise
         except Exception as e:
-            logger.error(f"Failed to add image metadata for {filename}: {e}")
+            logger.error(f"Failed to add file record for {original_name}: {e}")
             raise
     
 
@@ -173,19 +218,15 @@ class DatabaseManager:
         """Get database statistics."""
         try:
             with self.get_session() as session:
-                total_images = session.query(ImageMetadata).count()
-                processed_images = session.query(ImageMetadata).filter(
-                    ImageMetadata.processed_at.isnot(None)
-                ).count()
-                duplicate_images = session.query(ImageMetadata).filter(
-                    ImageMetadata.is_duplicate == True
+                total_files = session.query(FileRecord).count()
+                processed_files = session.query(FileRecord).filter(
+                    FileRecord.processed_at.isnot(None)
                 ).count()
                 
                 return {
-                    'total_images': total_images,
-                    'processed_images': processed_images,
-                    'duplicate_images': duplicate_images,
-                    'pending_images': total_images - processed_images
+                    'total_files': total_files,
+                    'processed_files': processed_files,
+                    'pending_files': total_files - processed_files
                 }
         except Exception as e:
             logger.error(f"Failed to get statistics: {e}")
